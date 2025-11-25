@@ -15,16 +15,42 @@ class Candidate(Base):
     __tablename__ = "candidates"
     
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    phone = Column(String)
+    # Personal Information
     first_name = Column(String)
     last_name = Column(String)
+    email = Column(String, unique=True, index=True)
+    home_phone = Column(String)
+    mobile_phone = Column(String)
+    
+    # Professional Information
+    profession = Column(String)
     specialty = Column(String)
     current_job = Column(String)
-    status = Column(String, default="new")  # new, contacted, interested, not_interested, registered, max_contacts_reached
-    contact_count = Column(Integer, default=0)  # Track how many times contacted
-    last_contacted = Column(DateTime)  # Last contact date
-    source = Column(String, default="manual")
+    
+    # Location Information
+    city = Column(String)
+    state = Column(String)
+    zip_code = Column(String)
+    
+    # Status Tracking
+    status = Column(String, default="new")  # new, contacted, engaged, placed, unsubscribed
+    contact_count = Column(Integer, default=0)
+    last_contacted = Column(DateTime)
+    
+    # Recruiting-Specific Fields
+    source = Column(String, default="organic")  # organic, referral, linkedin, indeed, etc.
+    consent_given = Column(Boolean, default=True)
+    consent_date = Column(DateTime, default=datetime.utcnow)
+    last_contacted_by = Column(String)  # Recruiter name
+    preferred_contact_method = Column(String, default="email")
+    notes = Column(Text)  # Recruiter notes
+    priority_level = Column(String, default="medium")  # high, medium, low
+    
+    # Subscription Management
+    subscribed = Column(Boolean, default=True)
+    unsubscribe_token = Column(String, unique=True)
+    unsubscribed_at = Column(DateTime, nullable=True)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -38,6 +64,8 @@ class Conversation(Base):
     content = Column(Text)
     message_id = Column(String)
     status = Column(String, default="sent")  # sent, delivered, read, failed
+    thread_id = Column(String)  # For email threading
+    parent_id = Column(Integer)  # For reply chains
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Campaign(Base):
@@ -47,6 +75,7 @@ class Campaign(Base):
     name = Column(String)
     campaign_type = Column(String)  # email, sms, both
     target_specialty = Column(String)
+    recruiter_name = Column(String)  # Which recruiter is running this campaign
     message_template = Column(Text)
     status = Column(String, default="draft")  # draft, running, completed, paused
     sent_count = Column(Integer, default=0)

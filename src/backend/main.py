@@ -1,21 +1,37 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 import os
+from sqlalchemy import func
 import smtplib
 import time
+import secrets
+import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from twilio.rest import Client
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Database imports
-from models.database import get_db, Candidate, Conversation, Campaign
+from models.database import get_db, Candidate, Conversation, Campaign, Base, engine
+from services.conversation_orchestrator import ConversationOrchestrator
+from services.email_templates import MetaSenseTemplates
+
+# Force database schema creation
+print("🔄 Creating database tables...")
+Base.metadata.create_all(bind=engine)
+print("✅ Database tables created successfully!")
+print("🏥 MetaSense Inc. Recruitment System Ready")
 
 app = FastAPI(
     title="MetaSense Recruitment API",
-    description="AI-powered recruitment system for MetaSense Inc.",
-    version="1.0.0"
+    description="AI-powered healthcare recruitment system for MetaSense Inc.",
+    version="2.0.0"
 )
 
 # CORS setup
@@ -27,6 +43,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Utility Functions
+def generate_unsubscribe_token() -> str:
+    """Generate a secure random token for unsubscribe links"""
+    return secrets.token_urlsafe(32)
+
+def unsubscribe_candidate_db(candidate: Candidate, db: Session):
+    """Unsubscribe candidate from communications"""
+    candidate.subscribed = False
+    candidate.unsubscribed_at = datetime.utcnow()
+    candidate.status = "unsubscribed"
+    db.commit()
+
 # Real Email/SMS Functions
 def send_real_email(to_email: str, subject: str, body: str) -> bool:
     """Send actual email using your existing email code"""
@@ -35,7 +63,7 @@ def send_real_email(to_email: str, subject: str, body: str) -> bool:
         msg["From"] = os.getenv("IONOS_EMAIL")
         msg["To"] = to_email
         msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
+        msg.attach(MIMEText(body, "html" if "<" in body else "plain"))
 
         with smtplib.SMTP_SSL("smtp.ionos.com", 465) as server:
             server.login(os.getenv("IONOS_EMAIL"), os.getenv("IONOS_PASSWORD"))
@@ -70,34 +98,89 @@ def send_real_sms(to_phone: str, message: str) -> bool:
 # Health checks
 @app.get("/")
 async def root():
-    return {"message": "MetaSense Recruitment API is running"}
+    return {"message": "MetaSense Inc. Healthcare Recruitment API is running"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "database": "connected"}
+    return {"status": "healthy", "company": "MetaSense Inc.", "database": "connected"}
+
+# ==================== UNSUBSCRIBE SYSTEM ====================
+
+@app.get("/unsubscribe/{token}")
+async def unsubscribe_candidate(token: str, db: Session = Depends(get_db)):
+    """Handle unsubscribe requests"""
+    candidate = db.query(Candidate).filter(Candidate.unsubscribe_token == token).first()
+    
+    if not candidate:
+        return HTMLResponse("""
+        <html>
+            <head><title>MetaSense Inc. - Unsubscribe</title></head>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f8f9fa;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                    <h2 style="color: #2c5aa0;">MetaSense Inc.</h2>
+                    <h3>Unsubscribe Request</h3>
+                    <p>Invalid unsubscribe link. You may have already been unsubscribed or the link has expired.</p>
+                    <p>For immediate assistance, please contact us at <strong>+1 (856) 412-6100</strong>.</p>
+                    <a href="https://www.metasenseinc.com" style="color: #2c5aa0; text-decoration: none;">Return to MetaSense Inc.</a>
+                </div>
+            </body>
+        </html>
+        """)
+    
+    # Mark as unsubscribed
+    unsubscribe_candidate_db(candidate, db)
+    
+    return HTMLResponse(f"""
+    <html>
+        <head><title>Unsubscribe Successful - MetaSense Inc.</title></head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f8f9fa;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                <h2 style="color: #2c5aa0;">MetaSense Inc.</h2>
+                <h3 style="color: #28a745;">Unsubscribe Successful</h3>
+                <p>You have been unsubscribed from MetaSense recruitment communications.</p>
+                <p>We're sorry to see you go! You will no longer receive emails or texts from us.</p>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                    <p><strong>Email:</strong> {candidate.email}</p>
+                    <p><strong>Name:</strong> {candidate.first_name} {candidate.last_name}</p>
+                </div>
+                <p>If this was a mistake or you'd like to resubscribe, please contact us at <strong>+1 (856) 412-6100</strong>.</p>
+                <a href="https://www.metasenseinc.com" style="color: #2c5aa0; text-decoration: none; font-weight: bold;">Return to MetaSense Inc.</a>
+            </div>
+        </body>
+    </html>
+    """)
 
 # ==================== CANDIDATE MANAGEMENT ====================
 
 @app.get("/api/candidates/count")
 async def get_candidates_count(db: Session = Depends(get_db)):
     count = db.query(Candidate).count()
-    return {"total_candidates": count}
+    return {"total_candidates": count, "company": "MetaSense Inc."}
 
 @app.get("/api/candidates")
 async def get_candidates(db: Session = Depends(get_db)):
     candidates = db.query(Candidate).order_by(Candidate.created_at.desc()).all()
     return {
+        "company": "MetaSense Inc.",
         "candidates": [
             {
                 "id": c.id,
                 "first_name": c.first_name,
                 "last_name": c.last_name,
                 "email": c.email,
-                "phone": c.phone,
+                "home_phone": c.home_phone,
+                "mobile_phone": c.mobile_phone,
+                "profession": c.profession,
                 "specialty": c.specialty,
                 "current_job": c.current_job,
+                "city": c.city,
+                "state": c.state,
+                "zip_code": c.zip_code,
                 "status": c.status,
                 "contact_count": c.contact_count,
+                "subscribed": c.subscribed,
+                "last_contacted_by": c.last_contacted_by,
+                "priority_level": c.priority_level,
                 "last_contacted": c.last_contacted.isoformat() if c.last_contacted else None,
                 "created_at": c.created_at.isoformat()
             } for c in candidates
@@ -111,12 +194,26 @@ async def create_candidate(candidate_data: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Candidate with this email already exists")
     
     candidate = Candidate(
-        email=candidate_data.get("email"),
-        phone=candidate_data.get("phone"),
+        # Personal Information
         first_name=candidate_data.get("first_name"),
         last_name=candidate_data.get("last_name"),
+        email=candidate_data.get("email"),
+        home_phone=candidate_data.get("home_phone"),
+        mobile_phone=candidate_data.get("mobile_phone"),
+        
+        # Professional Information
+        profession=candidate_data.get("profession"),
         specialty=candidate_data.get("specialty"),
-        current_job=candidate_data.get("current_job")
+        current_job=candidate_data.get("current_job"),
+        
+        # Location Information
+        city=candidate_data.get("city"),
+        state=candidate_data.get("state"),
+        zip_code=candidate_data.get("zip_code"),
+        
+        # Subscription
+        unsubscribe_token=generate_unsubscribe_token(),
+        subscribed=True
     )
     
     db.add(candidate)
@@ -126,130 +223,40 @@ async def create_candidate(candidate_data: dict, db: Session = Depends(get_db)):
     return {
         "success": True,
         "id": candidate.id,
-        "message": "Candidate created successfully"
+        "message": "Candidate created successfully",
+        "company": "MetaSense Inc."
     }
 
-@app.put("/api/candidates/{candidate_id}")
-async def update_candidate(candidate_id: int, candidate_data: dict, db: Session = Depends(get_db)):
-    """Recruiters can manually update candidate information"""
+@app.post("/api/candidates/{candidate_id}/unsubscribe")
+async def manual_unsubscribe(candidate_id: int, db: Session = Depends(get_db)):
+    """Manually unsubscribe a candidate"""
     candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
     
-    # Update fields if provided
-    if 'first_name' in candidate_data:
-        candidate.first_name = candidate_data['first_name']
-    if 'last_name' in candidate_data:
-        candidate.last_name = candidate_data['last_name']
-    if 'email' in candidate_data:
-        candidate.email = candidate_data['email']
-    if 'phone' in candidate_data:
-        candidate.phone = candidate_data['phone']
-    if 'specialty' in candidate_data:
-        candidate.specialty = candidate_data['specialty']
-    if 'current_job' in candidate_data:
-        candidate.current_job = candidate_data['current_job']
-    if 'status' in candidate_data:
-        candidate.status = candidate_data['status']
-    if 'contact_count' in candidate_data:
-        candidate.contact_count = candidate_data['contact_count']
-    
-    db.commit()
+    unsubscribe_candidate_db(candidate, db)
     
     return {
         "success": True,
-        "message": "Candidate updated successfully",
-        "candidate": {
-            "id": candidate.id,
-            "first_name": candidate.first_name,
-            "last_name": candidate.last_name,
-            "status": candidate.status,
-            "contact_count": candidate.contact_count
-        }
-    }
-
-@app.post("/api/candidates/{candidate_id}/reset")
-async def reset_candidate(candidate_id: int, db: Session = Depends(get_db)):
-    """Reset a single candidate to 'new' status"""
-    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    candidate.status = "new"
-    candidate.contact_count = 0
-    candidate.last_contacted = None
-    
-    db.commit()
-    
-    return {
-        "success": True,
-        "message": f"Reset {candidate.first_name} {candidate.last_name} to new status"
-    }
-
-@app.post("/api/candidates/reset-all")
-async def reset_all_candidates(db: Session = Depends(get_db)):
-    """Reset all candidates to 'new' status - for testing"""
-    candidates = db.query(Candidate).all()
-    reset_count = 0
-    
-    for candidate in candidates:
-        candidate.status = "new"
-        candidate.contact_count = 0
-        candidate.last_contacted = None
-        reset_count += 1
-    
-    db.commit()
-    
-    return {
-        "success": True,
-        "reset_count": reset_count,
-        "message": f"Reset {reset_count} candidates to 'new' status"
-    }
-
-@app.get("/api/candidates/{candidate_id}/contact-history")
-async def get_candidate_contact_history(candidate_id: int, db: Session = Depends(get_db)):
-    """Get candidate's full contact history"""
-    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    
-    conversations = db.query(Conversation).filter(
-        Conversation.candidate_id == candidate_id
-    ).order_by(Conversation.created_at.desc()).all()
-    
-    return {
-        "candidate": {
-            "id": candidate.id,
-            "name": f"{candidate.first_name} {candidate.last_name}",
-            "contact_count": candidate.contact_count,
-            "status": candidate.status,
-            "last_contacted": candidate.last_contacted.isoformat() if candidate.last_contacted else None
-        },
-        "contact_history": [
-            {
-                "id": conv.id,
-                "channel": conv.channel,
-                "message_type": conv.message_type,
-                "content": conv.content,
-                "sent_at": conv.created_at.isoformat(),
-                "status": conv.status
-            } for conv in conversations
-        ]
+        "message": f"Unsubscribed {candidate.first_name} {candidate.last_name}",
+        "company": "MetaSense Inc."
     }
 
 # ==================== OUTREACH CAMPAIGNS ====================
 
 @app.post("/api/campaigns/outreach")
 async def start_outreach_campaign(campaign_data: dict, db: Session = Depends(get_db)):
-    """Start REAL outreach campaign with 3-contact limit"""
+    """Start professional outreach campaign for MetaSense Inc."""
     specialty_filter = campaign_data.get("specialty")
     channel = campaign_data.get("channel", "email")
+    recruiter_name = campaign_data.get("recruiter", random.choice(MetaSenseTemplates.RECRUITERS))
     max_contact_limit = 3
     
-    # Get candidates with less than 3 contacts
+    # Professional targeting for healthcare recruiting
     query = db.query(Candidate).filter(
         Candidate.status.in_(["new", "contacted"]),
-        Candidate.contact_count < max_contact_limit
+        Candidate.contact_count < max_contact_limit,
+        Candidate.subscribed == True
     )
     
     if specialty_filter:
@@ -259,27 +266,18 @@ async def start_outreach_campaign(campaign_data: dict, db: Session = Depends(get
     
     campaign_results = []
     for candidate in candidates:
-        # Generate personalized message
+        # Use professional MetaSense templates
         if channel == "sms":
-            message = f"Hi {candidate.first_name}! Your {candidate.specialty} experience caught our eye at MetaSense. We have matching roles! Register: https://www.metasenseinc.com/register"
-            subject = "Healthcare Opportunities"
+            message = MetaSenseTemplates.get_sms_template(candidate)
+            subject = "Healthcare Opportunities with MetaSense"
         else:
-            message = f"""Hello {candidate.first_name},
-
-I'm reaching out from MetaSense about {candidate.specialty} opportunities matching your background.
-
-We connect healthcare professionals with great roles at hospitals and clinics.
-
-Register your profile: https://www.metasenseinc.com/register
-
-Best regards,
-The MetaSense Team"""
-            subject = f"Healthcare Opportunities for {candidate.specialty} Professionals"
+            message = MetaSenseTemplates.get_initial_email(candidate, specialty_filter)
+            subject = f"Healthcare {candidate.specialty} Opportunities - MetaSense Inc."
         
         # SEND FOR REAL
         send_success = False
-        if channel == "sms" and candidate.phone:
-            send_success = send_real_sms(candidate.phone, message)
+        if channel == "sms" and candidate.mobile_phone:
+            send_success = send_real_sms(candidate.mobile_phone, message)
         elif channel == "email" and candidate.email:
             send_success = send_real_email(candidate.email, subject, message)
         
@@ -287,6 +285,7 @@ The MetaSense Team"""
             # Update contact tracking
             candidate.contact_count += 1
             candidate.last_contacted = datetime.utcnow()
+            candidate.last_contacted_by = recruiter_name
             
             if candidate.contact_count >= max_contact_limit:
                 candidate.status = "max_contacts_reached"
@@ -307,14 +306,17 @@ The MetaSense Team"""
             "candidate_id": candidate.id,
             "name": f"{candidate.first_name} {candidate.last_name}",
             "email": candidate.email,
-            "phone": candidate.phone,
+            "mobile_phone": candidate.mobile_phone,
+            "profession": candidate.profession,
             "specialty": candidate.specialty,
             "current_contact_count": candidate.contact_count,
             "max_contacts": max_contact_limit,
             "channel": channel,
+            "recruiter": recruiter_name,
             "sent_success": send_success
         })
         
+        # Professional pacing
         time.sleep(2)
     
     db.commit()
@@ -323,9 +325,11 @@ The MetaSense Team"""
     
     return {
         "success": True,
+        "company": "MetaSense Inc.",
         "campaign": {
             "target_specialty": specialty_filter,
             "channel": channel,
+            "recruiter": recruiter_name,
             "max_contact_limit": max_contact_limit,
             "candidates_contacted": len(campaign_results),
             "successful_sends": successful_sends,
@@ -334,35 +338,228 @@ The MetaSense Team"""
         "results": campaign_results
     }
 
+# ==================== AI RESPONSE HANDLERS ====================
+
+@app.post("/api/webhooks/email-reply")
+async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
+    """Handle incoming email replies from candidates"""
+    try:
+        # Extract email data
+        sender_email = webhook_data.get("from")
+        subject = webhook_data.get("subject", "")
+        message_body = webhook_data.get("text", "")
+        message_id = webhook_data.get("message_id", "")
+        
+        # Find candidate by email
+        candidate = db.query(Candidate).filter(Candidate.email == sender_email).first()
+        if not candidate:
+            print(f"❌ No candidate found for email: {sender_email}")
+            return {"status": "ignored", "reason": "Candidate not found"}
+        
+        # Check if candidate is unsubscribed
+        if not candidate.subscribed:
+            print(f"❌ Candidate {sender_email} is unsubscribed, ignoring message")
+            return {"status": "ignored", "reason": "Candidate unsubscribed"}
+        
+        # Check for unsubscribe keywords in message
+        unsubscribe_keywords = ["unsubscribe", "stop", "remove", "cancel", "opt out"]
+        if any(keyword in message_body.lower() for keyword in unsubscribe_keywords):
+            unsubscribe_candidate_db(candidate, db)
+            print(f"✅ Candidate {sender_email} unsubscribed via email request")
+            return {
+                "success": True,
+                "action": "unsubscribed",
+                "message": "Candidate unsubscribed based on email content",
+                "company": "MetaSense Inc."
+            }
+        
+        # Get conversation history
+        conversation_history = db.query(Conversation).filter(
+            Conversation.candidate_id == candidate.id
+        ).order_by(Conversation.created_at.desc()).limit(10).all()
+        
+        # Generate AI response
+        orchestrator = ConversationOrchestrator()
+        ai_response = orchestrator.generate_response(
+            channel="email",
+            candidate=candidate,
+            incoming_message=message_body,
+            conversation_history=conversation_history
+        )
+        
+        # Send automated reply
+        reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
+        send_success = send_real_email(sender_email, reply_subject, ai_response)
+        
+        # Log both incoming and outgoing messages
+        incoming_conv = Conversation(
+            candidate_id=candidate.id,
+            channel="email",
+            message_type="inbound",
+            content=message_body,
+            message_id=message_id,
+            status="received"
+        )
+        db.add(incoming_conv)
+        
+        outgoing_conv = Conversation(
+            candidate_id=candidate.id,
+            channel="email",
+            message_type="outbound",
+            content=ai_response,
+            status="sent" if send_success else "failed"
+        )
+        db.add(outgoing_conv)
+        
+        # Update candidate status
+        candidate.status = "engaged"
+        candidate.last_contacted = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "candidate_id": candidate.id,
+            "response_sent": send_success,
+            "message": "AI response generated and sent",
+            "company": "MetaSense Inc."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error handling email reply: {e}")
+        raise HTTPException(status_code=500, detail="Error processing email reply")
+
+@app.post("/api/webhooks/sms-reply")
+async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
+    """Handle incoming SMS replies from candidates"""
+    try:
+        # Extract SMS data (Twilio webhook format)
+        from_phone = webhook_data.get("From", "")
+        message_body = webhook_data.get("Body", "")
+        message_sid = webhook_data.get("MessageSid", "")
+        
+        # Find candidate by mobile phone
+        candidate = db.query(Candidate).filter(Candidate.mobile_phone == from_phone).first()
+        if not candidate:
+            print(f"❌ No candidate found for phone: {from_phone}")
+            return {"status": "ignored", "reason": "Candidate not found"}
+        
+        # Check if candidate is unsubscribed
+        if not candidate.subscribed:
+            print(f"❌ Candidate {from_phone} is unsubscribed, ignoring message")
+            return {"status": "ignored", "reason": "Candidate unsubscribed"}
+        
+        # Check for unsubscribe keywords in message
+        unsubscribe_keywords = ["stop", "unsubscribe", "cancel", "end", "quit"]
+        if any(keyword in message_body.lower() for keyword in unsubscribe_keywords):
+            unsubscribe_candidate_db(candidate, db)
+            print(f"✅ Candidate {from_phone} unsubscribed via SMS request")
+            return {
+                "success": True,
+                "action": "unsubscribed",
+                "message": "Candidate unsubscribed based on SMS content",
+                "company": "MetaSense Inc."
+            }
+        
+        # Get conversation history
+        conversation_history = db.query(Conversation).filter(
+            Conversation.candidate_id == candidate.id
+        ).order_by(Conversation.created_at.desc()).limit(10).all()
+        
+        # Generate AI response
+        orchestrator = ConversationOrchestrator()
+        ai_response = orchestrator.generate_response(
+            channel="sms",
+            candidate=candidate,
+            incoming_message=message_body,
+            conversation_history=conversation_history
+        )
+        
+        # Send automated reply
+        send_success = send_real_sms(from_phone, ai_response)
+        
+        # Log both incoming and outgoing messages
+        incoming_conv = Conversation(
+            candidate_id=candidate.id,
+            channel="sms",
+            message_type="inbound",
+            content=message_body,
+            message_id=message_sid,
+            status="received"
+        )
+        db.add(incoming_conv)
+        
+        outgoing_conv = Conversation(
+            candidate_id=candidate.id,
+            channel="sms",
+            message_type="outbound",
+            content=ai_response,
+            status="sent" if send_success else "failed"
+        )
+        db.add(outgoing_conv)
+        
+        # Update candidate status
+        candidate.status = "engaged"
+        candidate.last_contacted = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "candidate_id": candidate.id,
+            "response_sent": send_success,
+            "message": "AI response generated and sent",
+            "company": "MetaSense Inc."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error handling SMS reply: {e}")
+        raise HTTPException(status_code=500, detail="Error processing SMS reply")
+
 # ==================== TESTING & SAMPLE DATA ====================
 
 @app.post("/api/test/setup-sample-data")
 async def setup_sample_data(db: Session = Depends(get_db)):
-    """Create sample candidates for testing"""
+    """Create sample healthcare candidates for testing"""
     sample_candidates = [
         {
-            "email": "nurse.mary@example.com",
-            "phone": "+1215550101",
-            "first_name": "Mary",
-            "last_name": "Johnson", 
-            "specialty": "Registered Nurse",
-            "current_job": "ICU Nurse"
+            "first_name": "Maria",
+            "last_name": "Rodriguez",
+            "email": "maria.rodriguez@example.com",
+            "home_phone": "+1215550101",
+            "mobile_phone": "+1215550111",
+            "profession": "Registered Nurse",
+            "specialty": "Emergency Room",
+            "current_job": "ER Nurse",
+            "city": "Camden",
+            "state": "NJ",
+            "zip_code": "08102"
         },
         {
-            "email": "therapist.david@example.com", 
-            "phone": "+1215550102",
-            "first_name": "David",
-            "last_name": "Chen",
-            "specialty": "Physical Therapist",
-            "current_job": "Senior PT"
+            "first_name": "James",
+            "last_name": "Wilson",
+            "email": "james.wilson@example.com",
+            "home_phone": "+1215550102",
+            "mobile_phone": "+1215550112",
+            "profession": "Physical Therapist",
+            "specialty": "Orthopedics",
+            "current_job": "Senior PT",
+            "city": "Cherry Hill",
+            "state": "NJ",
+            "zip_code": "08002"
         },
         {
-            "email": "tech.sarah@example.com",
-            "phone": "+1215550103", 
-            "first_name": "Sarah",
-            "last_name": "Williams",
-            "specialty": "Radiology Tech",
-            "current_job": "MRI Technician"
+            "first_name": "Lisa",
+            "last_name": "Thompson",
+            "email": "lisa.thompson@example.com",
+            "home_phone": "+1215550103",
+            "mobile_phone": "+1215550113",
+            "profession": "Radiology Technician",
+            "specialty": "MRI Technology",
+            "current_job": "MRI Tech",
+            "city": "Voorhees",
+            "state": "NJ",
+            "zip_code": "08043"
         }
     ]
     
@@ -370,7 +567,11 @@ async def setup_sample_data(db: Session = Depends(get_db)):
     for candidate_data in sample_candidates:
         existing = db.query(Candidate).filter(Candidate.email == candidate_data["email"]).first()
         if not existing:
-            candidate = Candidate(**candidate_data)
+            candidate = Candidate(
+                **candidate_data,
+                unsubscribe_token=generate_unsubscribe_token(),
+                subscribed=True
+            )
             db.add(candidate)
             added_count += 1
     
@@ -379,7 +580,8 @@ async def setup_sample_data(db: Session = Depends(get_db)):
     return {
         "success": True,
         "added_count": added_count,
-        "message": f"Added {added_count} sample candidates"
+        "message": f"Added {added_count} sample healthcare candidates",
+        "company": "MetaSense Inc."
     }
 
 # ==================== DASHBOARD & ANALYTICS ====================
@@ -389,15 +591,29 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     total_candidates = db.query(Candidate).count()
     new_candidates = db.query(Candidate).filter(Candidate.status == "new").count()
     contacted_candidates = db.query(Candidate).filter(Candidate.status == "contacted").count()
+    engaged_candidates = db.query(Candidate).filter(Candidate.status == "engaged").count()
     max_contacted = db.query(Candidate).filter(Candidate.status == "max_contacts_reached").count()
+    unsubscribed_count = db.query(Candidate).filter(Candidate.subscribed == False).count()
     total_conversations = db.query(Conversation).count()
     
+    # Healthcare specialty breakdown
+    top_specialties = db.query(Candidate.specialty, func.count(Candidate.specialty))\
+                   .group_by(Candidate.specialty)\
+                   .order_by(func.count(Candidate.specialty).desc())\
+                   .limit(5).all()
+    
     return {
-        "total_candidates": total_candidates,
-        "new_candidates": new_candidates,
-        "contacted_candidates": contacted_candidates,
-        "max_contacted_candidates": max_contacted,
-        "total_conversations": total_conversations
+        "company": "MetaSense Inc.",
+        "stats": {
+            "total_candidates": total_candidates,
+            "new_candidates": new_candidates,
+            "contacted_candidates": contacted_candidates,
+            "engaged_candidates": engaged_candidates,
+            "max_contacted_candidates": max_contacted,
+            "unsubscribed_candidates": unsubscribed_count,
+            "total_conversations": total_conversations
+        },
+        "top_specialties": [{"specialty": spec, "count": count} for spec, count in top_specialties]
     }
 
 if __name__ == "__main__":

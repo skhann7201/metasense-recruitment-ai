@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Database imports
-from models.database import get_db, Candidate, Conversation, Campaign, Base, engine
+from models.database import get_db, Candidate, Conversation, Campaign, PendingResponse, Base, engine
 from services.conversation_orchestrator import ConversationOrchestrator
 from services.email_templates import MetaSenseTemplates
 
@@ -387,11 +387,7 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
             conversation_history=conversation_history
         )
         
-        # Send automated reply
-        reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
-        send_success = send_real_email(sender_email, reply_subject, ai_response)
-        
-        # Log both incoming and outgoing messages
+        # Log incoming message
         incoming_conv = Conversation(
             candidate_id=candidate.id,
             channel="email",
@@ -402,14 +398,18 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
         )
         db.add(incoming_conv)
         
-        outgoing_conv = Conversation(
+        # Queue response for approval instead of auto-sending
+        reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
+        pending_response = PendingResponse(
             candidate_id=candidate.id,
             channel="email",
-            message_type="outbound",
-            content=ai_response,
-            status="sent" if send_success else "failed"
+            incoming_message=message_body,
+            generated_content=ai_response,
+            status="pending",
+            subject=reply_subject,
+            recipient_email=sender_email
         )
-        db.add(outgoing_conv)
+        db.add(pending_response)
         
         # Update candidate status
         candidate.status = "engaged"
@@ -420,8 +420,8 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
         return {
             "success": True,
             "candidate_id": candidate.id,
-            "response_sent": send_success,
-            "message": "AI response generated and sent",
+            "pending_response_id": pending_response.id,
+            "message": "AI response generated and queued for approval",
             "company": "MetaSense Inc."
         }
         
@@ -475,10 +475,7 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
             conversation_history=conversation_history
         )
         
-        # Send automated reply
-        send_success = send_real_sms(from_phone, ai_response)
-        
-        # Log both incoming and outgoing messages
+        # Log incoming message
         incoming_conv = Conversation(
             candidate_id=candidate.id,
             channel="sms",
@@ -489,14 +486,16 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
         )
         db.add(incoming_conv)
         
-        outgoing_conv = Conversation(
+        # Queue response for approval instead of auto-sending
+        pending_response = PendingResponse(
             candidate_id=candidate.id,
             channel="sms",
-            message_type="outbound",
-            content=ai_response,
-            status="sent" if send_success else "failed"
+            incoming_message=message_body,
+            generated_content=ai_response,
+            status="pending",
+            recipient_phone=from_phone
         )
-        db.add(outgoing_conv)
+        db.add(pending_response)
         
         # Update candidate status
         candidate.status = "engaged"
@@ -507,14 +506,152 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
         return {
             "success": True,
             "candidate_id": candidate.id,
-            "response_sent": send_success,
-            "message": "AI response generated and sent",
+            "pending_response_id": pending_response.id,
+            "message": "AI response generated and queued for approval",
             "company": "MetaSense Inc."
         }
         
     except Exception as e:
         print(f"❌ Error handling SMS reply: {e}")
         raise HTTPException(status_code=500, detail="Error processing SMS reply")
+
+# ==================== RESPONSE APPROVAL WORKFLOW ====================
+
+@app.get("/api/responses/pending")
+async def get_pending_responses(db: Session = Depends(get_db)):
+    """Get all pending responses awaiting approval"""
+    pending = db.query(PendingResponse).filter(
+        PendingResponse.status == "pending"
+    ).order_by(PendingResponse.created_at.desc()).all()
+    
+    results = []
+    for response in pending:
+        candidate = db.query(Candidate).filter(Candidate.id == response.candidate_id).first()
+        results.append({
+            "id": response.id,
+            "candidate": {
+                "id": candidate.id,
+                "name": f"{candidate.first_name} {candidate.last_name}",
+                "email": candidate.email,
+                "mobile_phone": candidate.mobile_phone,
+                "specialty": candidate.specialty
+            },
+            "channel": response.channel,
+            "incoming_message": response.incoming_message,
+            "generated_content": response.generated_content,
+            "subject": response.subject,
+            "created_at": response.created_at.isoformat()
+        })
+    
+    return {
+        "success": True,
+        "count": len(results),
+        "pending_responses": results,
+        "company": "MetaSense Inc."
+    }
+
+@app.post("/api/responses/{response_id}/approve")
+async def approve_response(response_id: int, approval_data: dict, db: Session = Depends(get_db)):
+    """Approve and send a pending response"""
+    pending = db.query(PendingResponse).filter(PendingResponse.id == response_id).first()
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending response not found")
+    
+    if pending.status != "pending":
+        raise HTTPException(status_code=400, detail="Response has already been processed")
+    
+    # Get the content to send (edited or original)
+    content_to_send = pending.edited_content if pending.edited_content else pending.generated_content
+    reviewer_name = approval_data.get("reviewer_name", "Unknown Recruiter")
+    
+    # Send the response based on channel
+    send_success = False
+    if pending.channel == "email":
+        send_success = send_real_email(pending.recipient_email, pending.subject, content_to_send)
+    elif pending.channel == "sms":
+        send_success = send_real_sms(pending.recipient_phone, content_to_send)
+    
+    if send_success:
+        # Log the outgoing message
+        outgoing_conv = Conversation(
+            candidate_id=pending.candidate_id,
+            channel=pending.channel,
+            message_type="outbound",
+            content=content_to_send,
+            status="sent"
+        )
+        db.add(outgoing_conv)
+        
+        # Update pending response status
+        pending.status = "sent"
+        pending.reviewed_by = reviewer_name
+        pending.reviewed_at = datetime.utcnow()
+        pending.sent_at = datetime.utcnow()
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Response approved and sent successfully",
+            "response_id": response_id,
+            "company": "MetaSense Inc."
+        }
+    else:
+        pending.status = "failed"
+        pending.reviewed_by = reviewer_name
+        pending.reviewed_at = datetime.utcnow()
+        db.commit()
+        
+        raise HTTPException(status_code=500, detail="Failed to send response")
+
+@app.post("/api/responses/{response_id}/reject")
+async def reject_response(response_id: int, rejection_data: dict, db: Session = Depends(get_db)):
+    """Reject a pending response without sending"""
+    pending = db.query(PendingResponse).filter(PendingResponse.id == response_id).first()
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending response not found")
+    
+    if pending.status != "pending":
+        raise HTTPException(status_code=400, detail="Response has already been processed")
+    
+    reviewer_name = rejection_data.get("reviewer_name", "Unknown Recruiter")
+    
+    pending.status = "rejected"
+    pending.reviewed_by = reviewer_name
+    pending.reviewed_at = datetime.utcnow()
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": "Response rejected successfully",
+        "response_id": response_id,
+        "company": "MetaSense Inc."
+    }
+
+@app.put("/api/responses/{response_id}/edit")
+async def edit_response(response_id: int, edit_data: dict, db: Session = Depends(get_db)):
+    """Edit a pending response before approval"""
+    pending = db.query(PendingResponse).filter(PendingResponse.id == response_id).first()
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending response not found")
+    
+    if pending.status != "pending":
+        raise HTTPException(status_code=400, detail="Response has already been processed")
+    
+    new_content = edit_data.get("edited_content")
+    if not new_content:
+        raise HTTPException(status_code=400, detail="No edited content provided")
+    
+    pending.edited_content = new_content
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": "Response edited successfully",
+        "response_id": response_id,
+        "edited_content": new_content,
+        "company": "MetaSense Inc."
+    }
 
 # ==================== TESTING & SAMPLE DATA ====================
 

@@ -82,6 +82,24 @@ class Campaign(Base):
     response_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class PendingResponse(Base):
+    __tablename__ = "pending_responses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    candidate_id = Column(Integer, index=True)
+    channel = Column(String)  # email, sms
+    incoming_message = Column(Text)  # Original message from candidate
+    generated_content = Column(Text)  # AI-generated response
+    edited_content = Column(Text, nullable=True)  # Human-edited version (if modified)
+    status = Column(String, default="pending")  # pending, approved, rejected, sent
+    subject = Column(String, nullable=True)  # For email responses
+    recipient_email = Column(String, nullable=True)  # For email
+    recipient_phone = Column(String, nullable=True)  # For SMS
+    reviewed_by = Column(String, nullable=True)  # Recruiter who reviewed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+
 # Create all tables
 Base.metadata.create_all(bind=engine)
 

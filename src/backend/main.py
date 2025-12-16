@@ -378,6 +378,11 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
             Conversation.candidate_id == candidate.id
         ).order_by(Conversation.created_at.desc()).limit(10).all()
         
+        # Check if candidate wants to proceed/start process (ready for recruiter connection)
+        ready_keywords = ["yes", "interested", "ready", "start", "proceed", "let's go", 
+                         "sign me up", "i'm in", "sounds good", "let's do it", "when can we start"]
+        candidate_is_ready = any(keyword in message_body.lower() for keyword in ready_keywords)
+        
         # Generate AI response
         orchestrator = ConversationOrchestrator()
         ai_response = orchestrator.generate_response(
@@ -386,6 +391,12 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
             incoming_message=message_body,
             conversation_history=conversation_history
         )
+        
+        # If candidate is ready, add recruiter connection info to response
+        if candidate_is_ready and candidate.status != "ready_for_recruiter":
+            ai_response += "\n\n---\n🎉 Great! I'm connecting you with one of our recruiters who will reach out within 24 hours to discuss next steps. You can also call us directly at (856) 412-6100."
+            candidate.status = "ready_for_recruiter"
+            print(f"✅ Candidate {sender_email} is READY FOR RECRUITER CONNECTION")
         
         # Send automated reply
         reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
@@ -411,8 +422,9 @@ async def handle_email_reply(webhook_data: dict, db: Session = Depends(get_db)):
         )
         db.add(outgoing_conv)
         
-        # Update candidate status
-        candidate.status = "engaged"
+        # Update candidate status if not already set to ready_for_recruiter
+        if not candidate_is_ready:
+            candidate.status = "engaged"
         candidate.last_contacted = datetime.utcnow()
         
         db.commit()
@@ -466,6 +478,11 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
             Conversation.candidate_id == candidate.id
         ).order_by(Conversation.created_at.desc()).limit(10).all()
         
+        # Check if candidate wants to proceed/start process (ready for recruiter connection)
+        ready_keywords = ["yes", "interested", "ready", "start", "proceed", "let's go", 
+                         "sign me up", "i'm in", "sounds good", "let's do it", "when can we start"]
+        candidate_is_ready = any(keyword in message_body.lower() for keyword in ready_keywords)
+        
         # Generate AI response
         orchestrator = ConversationOrchestrator()
         ai_response = orchestrator.generate_response(
@@ -474,6 +491,12 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
             incoming_message=message_body,
             conversation_history=conversation_history
         )
+        
+        # If candidate is ready, add recruiter connection info to response
+        if candidate_is_ready and candidate.status != "ready_for_recruiter":
+            ai_response += "\n\n🎉 Great! A recruiter will call you within 24hrs. Or call us at (856) 412-6100."
+            candidate.status = "ready_for_recruiter"
+            print(f"✅ Candidate {from_phone} is READY FOR RECRUITER CONNECTION")
         
         # Send automated reply
         send_success = send_real_sms(from_phone, ai_response)
@@ -498,8 +521,9 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
         )
         db.add(outgoing_conv)
         
-        # Update candidate status
-        candidate.status = "engaged"
+        # Update candidate status if not already set to ready_for_recruiter
+        if not candidate_is_ready:
+            candidate.status = "engaged"
         candidate.last_contacted = datetime.utcnow()
         
         db.commit()
@@ -515,6 +539,109 @@ async def handle_sms_reply(webhook_data: dict, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"❌ Error handling SMS reply: {e}")
         raise HTTPException(status_code=500, detail="Error processing SMS reply")
+
+# ==================== CONVERSATION MONITORING ====================
+
+@app.get("/api/conversations")
+async def get_all_conversations(db: Session = Depends(get_db), limit: int = 100):
+    """View all conversations - for monitoring what the AI is saying"""
+    conversations = db.query(Conversation).order_by(
+        Conversation.created_at.desc()
+    ).limit(limit).all()
+    
+    results = []
+    for conv in conversations:
+        candidate = db.query(Candidate).filter(Candidate.id == conv.candidate_id).first()
+        results.append({
+            "id": conv.id,
+            "candidate_id": conv.candidate_id,
+            "candidate_name": f"{candidate.first_name} {candidate.last_name}" if candidate else "Unknown",
+            "channel": conv.channel,
+            "message_type": conv.message_type,
+            "content": conv.content,
+            "status": conv.status,
+            "created_at": conv.created_at.isoformat()
+        })
+    
+    return {
+        "success": True,
+        "total": len(results),
+        "conversations": results,
+        "company": "MetaSense Inc."
+    }
+
+@app.get("/api/conversations/candidate/{candidate_id}")
+async def get_candidate_conversations(candidate_id: int, db: Session = Depends(get_db)):
+    """View conversation history for a specific candidate"""
+    candidate = db.query(Candidate).filter(Candidate.id == candidate_id).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    
+    conversations = db.query(Conversation).filter(
+        Conversation.candidate_id == candidate_id
+    ).order_by(Conversation.created_at.asc()).all()
+    
+    messages = []
+    for conv in conversations:
+        messages.append({
+            "id": conv.id,
+            "channel": conv.channel,
+            "message_type": conv.message_type,
+            "content": conv.content,
+            "status": conv.status,
+            "created_at": conv.created_at.isoformat()
+        })
+    
+    return {
+        "success": True,
+        "candidate": {
+            "id": candidate.id,
+            "name": f"{candidate.first_name} {candidate.last_name}",
+            "email": candidate.email,
+            "phone": candidate.mobile_phone,
+            "status": candidate.status,
+            "specialty": candidate.specialty
+        },
+        "conversation_count": len(messages),
+        "messages": messages,
+        "company": "MetaSense Inc."
+    }
+
+@app.get("/api/candidates/ready-for-recruiter")
+async def get_ready_candidates(db: Session = Depends(get_db)):
+    """Get candidates who are ready to be connected with a recruiter"""
+    ready_candidates = db.query(Candidate).filter(
+        Candidate.status == "ready_for_recruiter"
+    ).order_by(Candidate.last_contacted.desc()).all()
+    
+    results = []
+    for candidate in ready_candidates:
+        # Get latest conversation
+        latest_conv = db.query(Conversation).filter(
+            Conversation.candidate_id == candidate.id
+        ).order_by(Conversation.created_at.desc()).first()
+        
+        results.append({
+            "id": candidate.id,
+            "name": f"{candidate.first_name} {candidate.last_name}",
+            "email": candidate.email,
+            "mobile_phone": candidate.mobile_phone,
+            "profession": candidate.profession,
+            "specialty": candidate.specialty,
+            "city": candidate.city,
+            "state": candidate.state,
+            "last_contacted": candidate.last_contacted.isoformat() if candidate.last_contacted else None,
+            "latest_message": latest_conv.content if latest_conv else None,
+            "latest_message_time": latest_conv.created_at.isoformat() if latest_conv else None
+        })
+    
+    return {
+        "success": True,
+        "count": len(results),
+        "ready_candidates": results,
+        "company": "MetaSense Inc.",
+        "message": f"{len(results)} candidates ready for recruiter connection"
+    }
 
 # ==================== TESTING & SAMPLE DATA ====================
 
